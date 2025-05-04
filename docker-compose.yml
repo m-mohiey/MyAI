@@ -1,0 +1,281 @@
+name: MyAI
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    volumes:
+      - open-webui:/app/backend/data
+    ports:
+      - 3000:8080
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    env_file:
+      - .env
+    depends_on:
+      - ollama
+    extra_hosts:
+      - myai:host-gateway
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - 11434:11434
+    # pull_policy: always
+    tty: true
+    restart: unless-stopped
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    ports:
+      - 4000:4000
+    environment:
+      - DATABASE_URL=${LITELLM_DATABASE_URL}
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    healthcheck:  # Defines the health check configuration for the container
+      test: [ "CMD", "curl", "-f", "http://localhost:4000/health/liveliness || exit 1" ]  # Command to execute for health check
+      interval: 30s  # Perform health check every 30 seconds
+      timeout: 10s   # Health check command times out after 10 seconds
+      retries: 3     # Retry up to 3 times if health check fails
+      start_period: 40s  # Wait 40 seconds after container start before beginning health checks
+
+  postgres:
+    image: postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - postgres:/var/lib/postgresql/data
+      - ./postgres/init-data.sh:/docker-entrypoint-initdb.d/init-data.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d postgres -U postgres"]
+      interval: 1s
+      timeout: 5s
+      retries: 10
+
+  langfuse:
+    image: langfuse/langfuse:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # ports:
+    #   - 3500:3000
+    extra_hosts:
+      - s3.localhost:host-gateway
+    env_file:
+      - .env
+    environment: &langfuse-env
+      - DATABASE_URL=${LANGFUSE_DATABASE_URL}
+      - NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET}
+      - SALT=${LANGFUSE_SALT}
+      - NEXTAUTH_URL=${LANGFUSE_NEXTAUTH_URL}
+      - TELEMETRY_ENABLED=${LANGFUSE_TELEMETRY_ENABLED:-false}
+      - REDIS_HOST=${LANGFUSE_REDIS_HOST}
+      - REDIS_PORT=${LANGFUSE_REDIS_PORT}
+      - REDIS_AUTH=${LANGFUSE_REDIS_AUTH}
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    # ports:
+    #   - 3505:3030
+    env_file:
+      - .env
+    environment: *langfuse-env
+
+  clickhouse:
+    image: clickhouse/clickhouse-server
+    restart: unless-stopped
+    user: 101:101
+    env_file:
+      - .env
+    # ports:
+    #   - 8123:8123
+    #   - 9000:9000
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    entrypoint: sh
+    # create the 'langfuse' bucket before starting the service
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    env_file:
+      - .env
+    # ports:
+    #   - 9090:9000
+    #   - 9091:9001
+    volumes:
+      - minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
+
+  caddy:
+    image: docker.io/library/caddy:2-alpine
+    restart: unless-stopped
+    # network_mode: host
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data:rw
+      - caddy-config:/config:rw
+    environment:
+      - N8N_HOSTNAME=${N8N_HOSTNAME:-":8001"}
+      - WEBUI_HOSTNAME=${WEBUI_HOSTNAME:-":8002"}
+      - FLOWISE_HOSTNAME=${FLOWISE_HOSTNAME:-":8003"}
+      - OLLAMA_HOSTNAME=${OLLAMA_HOSTNAME:-":8004"}
+      - SUPABASE_HOSTNAME=${SUPABASE_HOSTNAME:-":8005"}
+      - SEARXNG_HOSTNAME=${SEARXNG_HOSTNAME:-":8006"}
+      - LANGEFUSE_HOSTNAME=${LANGEFUSE_HOSTNAME:-":8007"}
+      - S3_HOSTNAME=${S3_HOSTNAME:-":8008"}
+      - MINIO_HOSTNAME=${MINIO_HOSTNAME:-":8009"}
+      - QDRANT_HOSTNAME=${QDRANT_HOSTNAME:-":8010"}
+      - MCPO_HOSTNAME=${MCPO_HOSTNAME:-":8011"}
+      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL:-internal}
+    env_file:
+      - .env
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    restart: unless-stopped
+    ports:
+      - 8080:8080
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=https://${SEARXNG_HOSTNAME:-localhost}/
+      - UWSGI_WORKERS=${SEARXNG_UWSGI_WORKERS:-4}
+      - UWSGI_THREADS=${SEARXNG_UWSGI_THREADS:-4}
+      - SEARXNG_REDIS_URL=redis://:redis@redis:6379/0
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1" 
+
+  redis:
+    image: docker.io/valkey/valkey:8-alpine
+    command: valkey-server --save 30 1 --loglevel warning --requirepass ${REDIS_AUTH:-redis}
+    restart: unless-stopped  
+    volumes:
+      - valkey-data:/data
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:1.83.2
+    restart: unless-stopped
+    environment:
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_N8N_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_N8N_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_N8N_PASSWORD}
+    env_file:
+      - .env
+    ports:
+      - 5678:5678
+    links:
+      - postgres
+    volumes:
+      - n8n:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  qdrant:
+    image: qdrant/qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant:/qdrant/storage
+
+  mcpo:
+    image: ghcr.io/open-webui/mcpo:main
+    command: --config /app/config.json
+    volumes:
+      # - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPDATA}/Claude/claude_desktop_config.json:/app/config.json:ro
+
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.49.1-noble
+    command: npx -y playwright@1.49.1 run-server --port 3000 --host 0.0.0.0
+
+  watchtower:
+    image: containrrr/watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  ollama: {}
+  open-webui: {}
+  postgres: {}
+  caddy-data: {}
+  caddy-config: {}
+  valkey-data: {}
+  n8n: {}
+  clickhouse-data: {}
+  clickhouse-logs: {}
+  minio: {}
+  qdrant: {}
