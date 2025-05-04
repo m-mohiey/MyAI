@@ -1,0 +1,28 @@
+flowchart TB
+    User["User"] --> UI["User Interface"]
+    UI --> QU["Query Understanding"]
+    QU --> RS["Retrieval System"]
+    QU --> |User Context| RR["Re-Ranking System"]
+    RS --> |Retrieved Documents| RR
+    RR --> |Re-Ranked Documents| AG["Answer Generation"]
+    AG --> |Generated Response| UI
+    DP["Data Pipeline"] --> |Processed Content| KS["Knowledge Store"]
+    KS --> RS
+    EF["Evaluation & Feedback"] --> |Performance Metrics| QU
+    EF --> |Performance Metrics| RS
+    EF --> |Performance Metrics| RR
+    EF --> |Performance Metrics| AG
+    UI --> |User Feedback| EF
+    
+    subgraph "Knowledge Store"
+        VDB["Vector Database"]
+        TI["Traditional Index"]
+        MD["Metadata Store"]
+    end
+    
+    subgraph "Data Pipeline"
+        DC["Data Connectors"]
+        DP1["Document Processing"]
+        EG["Embedding Generation"]
+        ME["Metadata Extraction"]
+    end
