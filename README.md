@@ -41,7 +41,7 @@ cd MyAI
 
 ### 2. Configure Providers
 ```bash
-cp example.env .env
+cp .env.example .env
 ```
 
 ### 3. Spin Up Containers
